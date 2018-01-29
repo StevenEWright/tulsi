@@ -620,7 +620,8 @@ class BazelBuildBridge(object):
     #
     # For this reason, -fdebug-prefix-map is provided as a default for non-
     # distributed purposes.
-    if self.use_debug_prefix_map:
+    is_macos_test = self.is_test and self.platform_name.startswith('macos')
+    if self.use_debug_prefix_map or is_macos_test:
       # Add the debug source maps now that we have bazel_executable.
       source_maps = self._ExtractTargetSourceMaps()
 
@@ -1466,17 +1467,20 @@ class BazelBuildBridge(object):
 
       if clear_source_map:
         out.write('settings clear target.source-map\n')
-        self._LinkTulsiLLDBInitEpilogue(out)
-        return 0
+        # TODO: Is there a reason this should ever end here?
+        # self._LinkTulsiLLDBInitEpilogue(out)
+        # return 0
 
       timer = Timer(
           '\tExtracting source paths for ' + self.full_product_name,
           'extracting_source_paths').Start()
 
-      source_map = self._ExtractExecrootSourceMap()
+      source_maps = []
+      source_maps.extend(self._ExtractSourceMapFromObjectFile())
+      source_maps.append(self._ExtractExecrootSourceMap())
       timer.End()
 
-      if not source_map:
+      if not source_maps:
         _PrintXcodeWarning('Extracted 0 source paths from %r. File-based '
                            'breakpoints may not work. Please report as a bug.' %
                            self.full_product_name)
@@ -1484,6 +1488,11 @@ class BazelBuildBridge(object):
 
       out.write('# This maps Bazel\'s execution root to that used by %r.\n' %
                 os.path.basename(self.project_file_path))
+
+      out.write('settings set target.source-map "%s" "%s"\n' % source_maps[0])
+      if len(source_maps) > 1:
+        for source_map in source_maps[1:]:
+            out.write('settings append target.source-map "%s" "%s"\n' % source_map)
 
       out.write('settings set target.source-map "%s" "%s"\n' % source_map)
       self._LinkTulsiLLDBInitEpilogue(out)
@@ -1835,6 +1844,38 @@ class BazelBuildBridge(object):
             copy_result = subprocess.call(copy_cmd, shell=True)
 
     return 0
+
+  def _ExtractSourceMapFromObjectFile(self):
+    """Extracts the debug symbol path as a tuple with the WORKSPACE path.
+
+    Returns:
+      None: if an error occurred.
+      (str, str): a tuple representing the debug symbol root path to source
+                  files compiled by Bazel as strings ($0) associated with the
+                  paths to Xcode-visible sources used for the purposes of Tulsi
+                  debugging as strings ($1).
+    """
+
+    # If there is no binary, there is nothing to process.
+    if not os.path.isfile(self.binary_path):
+      return ()
+
+    _PrintXcodeWarning('Generating lldb mapping symbols %s -> %s' % (self.binary_path, self.workspace_root))
+
+    source_paths = []
+    command = "nm -pa \"%s\" | grep \" SO \" | grep \"/\" | cut -d' ' -f9-" % self.binary_path
+    source_paths.extend(subprocess.check_output(command, shell=True).split("\n"))
+    debug_workspace_roots = []
+    for path in source_paths:
+        execroot = "execroot/"
+        start_index = path.find(execroot)
+        if start_index == -1:
+            continue
+        start_index = start_index + len(execroot)
+        start_index = path.find("/", start_index)
+        debug_workspace_roots.append((path[:start_index], self.workspace_root))
+
+    return debug_workspace_roots
 
   def _ExtractExecrootSourceMap(self):
     """Extracts the execution root as a tuple with the WORKSPACE path.
