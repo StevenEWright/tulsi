@@ -25,6 +25,10 @@ readonly bazel_executable="$1"
 readonly bazel_bin_dir="$2"
 readonly tulsi_includes_dir="tulsi-includes"
 
+# Kill LLDB
+rpc_server_pid=$(ps -A | grep \"lldb-rpc-server\" | awk '{print $1}')
+[[ -z "${rpc_server_pid// }" ]] && kill -9 ${rpc_server_pid}
+
 if [[ "${ACTION}" != "clean" ]]; then
   exit 0
 fi
