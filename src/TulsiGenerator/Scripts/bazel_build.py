@@ -739,6 +739,15 @@ class BazelBuildBridge(object):
         _PrintXcodeWarning('Updating .lldbinit action failed with code %d' %
                            exit_code)
 
+      is_macos_test = self.is_test and self.platform_name.startswith('macos')
+      if is_macos_test:
+          timer = Timer('Rebuilding first-depth bazel-out.', 'rebuilding_bazel_out').Start()
+          exit_code = self._ReconstructObjectPaths()
+          timer.End()
+          if exit_code:
+            _PrintXcodeWarning('Rebuilding bazel-out action failed with code %d' %
+                               exit_code)
+
     if self.code_coverage_enabled:
       timer = Timer('Patching LLVM covmap', 'patching_llvm_covmap').Start()
       exit_code = self._PatchLLVMCovmapPaths()
@@ -1785,6 +1794,47 @@ class BazelBuildBridge(object):
     if execroot_map:
       source_maps.add(execroot_map)
     return source_maps
+
+  def _ReconstructObjectPaths(self):
+    """Puts archives referenced by the OSO stabs in the Mach-O back into the
+    places they were created in. This is a terrible, ugly hack.
+    lldb's target.source-map is useful for taking care of source code mapping
+    but not for locating the object files referenced by the stabs in the Mach-O.
+    Unlike other toolchains, the linked binary does not contain the DWARF
+    debugging symbols. Instead, it refers to the .o's which were linked, and
+    expects them to be there to load the symbols from. No setting in lldb
+    appears to have control over loading of these paths.
+    """
+
+    # If there is no binary, there is nothing to process.
+    if not os.path.isfile(self.binary_path):
+      return ()
+
+    _PrintXcodeWarning('Reconstructing bazel-out')
+
+    # Recreate bazel-out environment.
+    source_paths = []
+    command = "nm -pa \"%s\" | grep \" OSO \" | grep \"/\" | cut -d' ' -f8-" % self.binary_path
+    source_paths.extend(subprocess.check_output(command, shell=True).split("\n"))
+    for path in source_paths:
+        bazel_out = "/bazel-out/"
+        if bazel_out in path:
+            end_filename = path.find("(")
+            final_path = path[:end_filename]
+            start_filename = end_rootpath = path.find(os.path.basename(final_path))
+            start_rootpath = path.find(bazel_out)
+
+            abs_path = path[:start_filename]
+            root_path = path[start_rootpath:end_rootpath]
+            filename = path[start_filename:end_filename]
+
+            mkdir_cmd = "mkdir -p %s" % abs_path
+            mkdir_result = subprocess.check_output(mkdir_cmd, shell=True)
+
+            copy_cmd = "cp %s%s%s %s" % (self.workspace_root, root_path, filename, abs_path)
+            copy_result = subprocess.call(copy_cmd, shell=True)
+
+    return 0
 
   def _ExtractExecrootSourceMap(self):
     """Extracts the execution root as a tuple with the WORKSPACE path.
